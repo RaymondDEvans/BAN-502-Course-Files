@@ -1,0 +1,118 @@
+---
+title: "M6_Assignment1"
+author: "REvans"
+format: docx
+editor: visual
+---
+
+## Cluster assignment quiz
+
+First load libraries
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(cluster)
+library(factoextra)
+library(dendextend)
+```
+
+import data set
+
+```{r}
+trucks <- read_csv("trucks-1.csv")
+# Plot distance and speeding
+ggplot(trucks, aes(Distance, Speeding)) +
+  geom_point()
+```
+
+Clean data frame
+
+```{r}
+trucks_cleaned <- select(trucks, Distance, Speeding)
+
+kmeans_recipe <- recipe(~ Distance + Speeding, trucks_cleaned) 
+
+trucks_dummy <- kmeans_recipe %>% 
+  step_scale(all_numeric()) %>%
+  step_center(all_numeric()) 
+
+trucks_dummy <- prep(trucks_dummy, trucks_cleaned) #prepares the recipe
+
+trucks_cleaned <- bake(trucks_dummy, trucks_cleaned) #applies the recipe and yields a data frame
+
+summary(trucks_cleaned)
+summary(trucks)
+```
+
+Q3 Use K-means clustering with two clusters (k=2) to cluster the trucks cleaned data frame. Use random number seed of 64. Use augment to add the resulting clusters object to the trucks data frame. Design an appropriate visualization to visualize the clusters.
+
+```{r}
+set.seed(64)
+clusters = kmeans(trucks_cleaned, 2)
+trucks = augment(clusters, trucks)
+str(trucks)
+
+ggplot(trucks, aes(Distance, Speeding, color = .cluster)) +
+  geom_point()
+```
+
+4\) Create k 1-8 clusters and visualize.
+
+```{r}
+set.seed(412)
+clusts = 
+  tibble(k = 1:8) %>% #try from 1 to 8 clusters
+  mutate(
+    kclust = map(k, ~kmeans(trucks_cleaned, .x)),
+    tidied = map(kclust, tidy),
+    glanced = map(kclust, glance),
+    augmented = map(kclust, augment, trucks_cleaned)
+  )
+
+clusts
+```
+
+```{r}
+clusters =
+  clusts %>%
+  unnest(cols = c(tidied))
+
+assignments = 
+  clusts %>% 
+  unnest(cols = c(augmented))
+
+clusterings = 
+  clusts %>%
+  unnest(cols = c(glanced))
+
+p1 = 
+  ggplot(assignments, aes(x = Distance, y = Speeding)) +
+  geom_point(aes(color = .cluster), alpha = 0.8) + 
+  facet_wrap(~ k)
+p1
+
+
+```
+
+```{r}
+ggplot(clusterings, aes(k, tot.withinss)) +
+  geom_line() +
+  geom_point()
+```
+
+Q6
+
+```{r}
+set.seed(64)
+clusters = kmeans(trucks_cleaned, 4)
+trucks = augment(clusters, trucks)
+str(trucks)
+```
+
+Plot 4 clusters
+
+```{r}
+ggplot(trucks, aes(Distance, Speeding, color = .cluster)) +
+  geom_point()
+```
