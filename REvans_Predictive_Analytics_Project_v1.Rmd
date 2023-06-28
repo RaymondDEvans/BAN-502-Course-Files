@@ -1,0 +1,723 @@
+---
+title: "Predictive Analytics Project"
+author: "REvans"
+date: "`r Sys.Date()`"
+output: word_document
+---
+
+Set up libraries
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(ggplot2)
+library(skimr)
+library(mice)
+library(VIM)
+library(ranger)
+library(randomForest) #also for random forests
+library(caret)
+library(skimr) #alternative way to view dataset summaries
+library(GGally)
+library(gridExtra)
+library(vip) #variable importance
+library(naniar) #visualizing missingness
+library(UpSetR) #visualizing missingness
+library(rpart)
+library(rpart.plot)
+library(RColorBrewer) #better visualization of classification trees
+library(rattle) #better visualization of classification trees
+library(e1071) #often needed for various statistical tasks
+library(ROCR) #for threshold selction
+library(nnet) #our neural network package
+```
+
+Load in the data set ames_student-1.csv
+
+```{r}
+Homes <- read_csv("ames_student-1.csv")
+```
+
+Clean data set, removing variables that do not contribute to the prediction of a yes result for Above_Median response. Convert categorical variables to factors, and remove rows with missing data.
+
+```{r}
+Homes <- Homes %>% select(-Latitude, 
+                          -Longitude,	
+                          -Street,
+		                    	-Utilities,
+				                	-BsmtFin_SF_1,
+							            -BsmtFin_SF_2,
+		                    	-Bsmt_Unf_SF,
+			                    -Low_Qual_Fin_SF,
+		                    	-Bsmt_Full_Bath,
+		                    	-Bsmt_Half_Bath,
+			                    -Bedroom_AbvGr,
+			                    -Kitchen_AbvGr,
+			                    -Fireplaces,
+		                      -Enclosed_Porch,
+			                    -Three_season_porch,
+			                    -Screen_Porch,
+		                      -Pool_Area,
+			                    -Misc_Val,
+			                    -Mo_Sold,
+			                    -Year_Sold,
+                          -Lot_Frontage)
+Homes <- Homes %>% mutate_if(is.character, as_factor)
+Homes = Homes %>% drop_na()
+str(Homes)
+summary(Homes)
+skim(Homes)
+gg_miss_var(Homes)
+```
+
+Split data into a training set and a test set
+
+```{r}
+set.seed(123)
+Homes_split <- initial_split(Homes, prop = 0.7, strata = Above_Median) #70% training stratified on Above_Median variable
+train <- training(Homes_split)
+test <- testing(Homes_split)
+```
+
+Make recipe for Homes data frame.
+
+```{r}
+Homes_recipe = recipe(Above_Median ~., train) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+```
+
+Set up cross fold validation.
+
+```{r}
+set.seed(123)
+folds = vfold_cv(train, v = 5)
+```
+
+#Random Forest ---------------------------------------------------------
+
+Create a random forest using the computer chosen parameters for the model.
+
+```{r}
+
+rf_model = rand_forest(mtry = tune(), min_n = tune(), trees = 100) %>% 
+  set_engine("ranger", importance = "permutation") %>% #added importance metric
+  set_mode("classification")
+
+Homes_wflow = 
+  workflow() %>% 
+  add_model(rf_model) %>% 
+  add_recipe(Homes_recipe)
+
+set.seed(123)
+rf_res = tune_grid(Homes_wflow, resamples = folds, grid = 20) # try 20 different combinations of the random forest tuning parameters
+
+```
+Look at mtry and min_n accuracy
+
+```{r}
+rf_res %>%
+  collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  select(mean, min_n, mtry) %>%
+  pivot_longer(min_n:mtry,
+    values_to = "value",
+    names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "Accuracy")
+```
+
+The accuracy varies between 91% and 95% for both mtry ( the number of predictors to sample at each split) and min_n (the number of observations needed to keep splitting the nodes)
+
+Create line graph of tuned parameters.
+
+```{r}
+rf_res %>%
+  collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  mutate(min_n = factor(min_n)) %>%
+  ggplot(aes(mtry, mean, color = min_n)) +
+  geom_line(alpha = 0.5, size = 1.5) +
+  geom_point() +
+  labs(y = "Accuracy")
+```
+
+
+
+Finalize work flow.
+
+```{r}
+best_rf = select_best(rf_res, "accuracy")
+
+final_rf = finalize_workflow(
+  Homes_wflow,
+  best_rf
+)
+
+final_rf
+```
+
+The computer selected parameters mtry and min_n are 159 and 12 for 100 trees.
+
+Fit the model with the training set and best random forest.
+
+```{r}
+#fit the finalized workflow to our training data
+final_rf_fit = fit(final_rf, train)
+
+#check variables again
+final_rf_fit %>% pull_workflow_fit() %>% vip(geom = "point")
+```
+
+The best variables for the model are Gr_Liv_Area and Year_Built.
+
+
+Make predictions on the training set and report the confusion matrix.
+
+```{r}
+
+trainpredrf = predict(final_rf_fit, train)
+confusionMatrix(trainpredrf$.pred_class, train$Above_Median, 
+                positive = "Yes")
+```
+
+Make predictions on the test set and report the confusion matrix.
+
+```{r}
+testpredrf = predict(final_rf_fit, test)
+head(testpredrf)
+confusionMatrix(testpredrf$.pred_class, test$Above_Median, 
+                positive = "Yes")
+```
+
+##Summary of results for the trainng and test sets for computer selected parameters mtry and min_n
+The training set predictions using the computer selected parameters is 0.9903 over a naive prediction of 0.508 while the test set prediction is 0.9026 over the naive prediction of 0.5081.  Both predictions on the training and test sets show great improvement in the model over the naive prediction.
+
+
+Tune parameters for better performance.
+
+```{r}
+Homes_recipe = recipe(Above_Median ~., train) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+rf_model = rand_forest(mtry = tune(), min_n = tune(), trees = 100) %>% 
+  set_engine("ranger", importance = "permutation") %>% #added importance metric
+  set_mode("classification")
+
+Homes_wflow = 
+  workflow() %>% 
+  add_model(rf_model) %>% 
+  add_recipe(Homes_recipe)
+
+rf_grid = grid_regular(
+  mtry(range = c(10,70)),
+  min_n(range = c(10,40)),
+  levels = 5
+)
+
+set.seed(123)
+rf_res_tuned <- tune_grid(Homes_wflow, resamples = folds, grid = rf_grid)
+```
+
+Recheck tuned performance.
+
+```{r}
+rf_res_tuned %>%
+  collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  select(mean, min_n, mtry) %>%
+  pivot_longer(min_n:mtry,
+    values_to = "value",
+    names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "Accuracy")
+```
+
+Make a line graph of the mtry and min_n accuracy.
+
+```{r}
+rf_res_tuned %>%
+  collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  mutate(min_n = factor(min_n)) %>%
+  ggplot(aes(mtry, mean, color = min_n)) +
+  geom_line(alpha = 0.5, size = 1.5) +
+  geom_point() +
+  labs(y = "Accuracy")
+```
+The accuracy for mtry and min_n after being tuned show a better line graph and the best parameter appears to be mtry of 70 and min_n of 17.
+
+Best tuned work flow.
+
+```{r}
+best_rf = select_best(rf_res_tuned, "accuracy")
+
+final_rf = finalize_workflow(
+  Homes_wflow,
+  best_rf
+)
+
+final_rf
+```
+
+Fit the new model with the tuned parameters.
+
+```{r}
+#fit the finalized workflow to our training data
+final_rf_fit = fit(final_rf, train)
+
+#check variables again
+final_rf_fit %>% pull_workflow_fit() %>% vip(geom = "point")
+```
+
+The best variables remain the same but have changed places in importance.  Gr_Liv_Area and Year_Built still remain the best while Graage_Area and Lot_Area switched places.
+
+
+Make prediction on new model and veiw a confusion matrix.
+
+```{r}
+trainpredrf = predict(final_rf_fit, train)
+confusionMatrix(trainpredrf$.pred_class, train$Above_Median, 
+                positive = "Yes")
+```
+
+Predict the test set on the new model and view a confusion matrix.
+
+```{r}
+testpredrf = predict(final_rf_fit, test)
+head(testpredrf)
+confusionMatrix(testpredrf$.pred_class, test$Above_Median, 
+                positive = "Yes")
+```
+
+After the tuning of the parameters the training set accuracy dropped from 0.9903 to 0.9882 while the naive value remained 0.508. on the test set the accuracy went up from 0.9058 to 0.9075 while its naive value remained 0.5081.  There is a significant improvement on the training and test sets for bot the computer chosen parameters and the tuned parameters over the naive values.
+
+#Classification tree ----------------------------------------------------------
+make a classification tree on the training set.
+
+```{r}
+Homes_recipe = recipe(Above_Median ~., train) %>%
+  step_dummy(all_nominal(),-all_outcomes())
+
+tree_model = decision_tree(cost_complexity = tune()) %>% 
+  set_engine("rpart", model = TRUE) %>% #don't forget the model = TRUE flag
+  set_mode("classification")
+
+tree_grid = grid_regular(cost_complexity(),
+                          levels = 25) #try 25 sensible values for cp
+
+Homes_wflow = 
+  workflow() %>% 
+  add_model(tree_model) %>% 
+  add_recipe(Homes_recipe)
+
+tree_res = 
+ Homes_wflow %>% 
+  tune_grid(
+    resamples = folds,
+    grid = tree_grid
+    )
+
+```
+
+Visualize the cost complexity parameter.
+
+```{r}
+tree_res %>%
+  collect_metrics() %>%
+  ggplot(aes(cost_complexity, mean)) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow = 2) 
+```
+
+The accuracy goes down and the cost_complexity (cp) increases. (cp is the minimum improvement in the model needed at each node.  This prunes the splits before they grow to far.) 
+
+Find the best fit
+
+```{r}
+best_tree = tree_res %>%
+  select_best("accuracy")
+
+best_tree
+```
+
+The best cp of 0.0075 is very small and will produce a large number of trees.  A cp closer to 1 will have fewer trees and be less computationally intense.
+
+Finalize the work flow and make a visual tree.
+
+```{r}
+final_wf = 
+  Homes_wflow %>% 
+  finalize_workflow(best_tree)
+
+final_fit = fit(final_wf, train)
+
+tree = final_fit %>% 
+  pull_workflow_fit() %>% 
+  pluck("fit")
+
+fancyRpartPlot(tree, tweak = 1.5) 
+```
+
+If the year_built is greater than 1985 there is a 51% chance for a yes that leads to 38% of the total of the Gr_Liv_Area with 91% chance of a yes if the living area is greater than 1144 square feet. If greater than 1144 sq/ft, 36% of the total houses have 97% chance of a yes result.  Therefore if the house is newer than 1985 and has a greater living area above 1144 square feet there is a good chance the house will sell for above the median price.  On the other hand, if the house was built before 1985 then the model looks at the number of fireplaces.  62% of the houses that have fireplaces more than zero will then look at the Gr_Liv_Area variable otherwise the house will not sell for above the median.  For houses older than 1985, with fireplaces, and have a Gr_Liv_Area more than 1643 square feet, up from the newer houses, then there is a 81% chance for 10% of the total to produce a yes response.  If the square footage is less than 1643, then the model looks at the year_Built variable again for houses newer than 1965.  3% of houses older than 1985 but newer than 1965 have an 88% chance of an above median value.  If the house is older than 1965, the model looks at Open_Porch_SF. With an open porch with square feet above 101, in addition to the previous variables, there is an 80% chance 1% of the houses will sell at above median price.
+
+
+Make prediction and confusion matrix for the training set.
+
+```{r}
+treepred = predict(final_fit, train, type = "class")
+head(treepred)
+
+confusionMatrix(treepred$.pred_class,train$Above_Median,positive="Yes") #predictions first then actual
+```
+
+Make a prediction for the test set.
+
+```{r}
+treepred = predict(final_fit, test, type = "class")
+head(treepred)
+
+confusionMatrix(treepred$.pred_class,test$Above_Median,positive="Yes") #predictions first then actual
+```
+
+#Summary for computer selected parameters.
+The training and test sets for the classification tree did not perform as well as the random forest model, but the naive result is the same for both.
+
+Tune the cp for  the classification tree to try and get a slightly better result.
+
+```{r}
+Homes_recipe = recipe(Above_Median ~., train) %>% 
+  step_dummy(all_nominal(),-all_outcomes())
+
+tree_model = decision_tree(cost_complexity = tune()) %>% 
+  set_engine("rpart", model = TRUE) %>% #don't forget the model = TRUE flag
+  set_mode("classification")
+
+tree_grid = expand.grid(cost_complexity = seq(0.001,0.01,by=0.001))
+
+Homes_wflow = 
+  workflow() %>% 
+  add_model(tree_model) %>% 
+  add_recipe(Homes_recipe)
+
+tree_res = 
+  Homes_wflow %>% 
+  tune_grid(
+    resamples = folds,
+    grid = tree_grid
+    )
+
+```
+Visualize cp accuracy for the tuned parameters.
+
+```{r}
+tree_res %>%
+  collect_metrics() %>%
+  ggplot(aes(cost_complexity, mean)) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow = 2) 
+```
+
+The new parameters have better accuracy results for cost complexity up to about 0.007 which is about the same as the computer selected values.
+
+Find the best cp value.
+
+```{r}
+best_tree = tree_res %>%
+  select_best("accuracy")
+
+best_tree
+```
+
+The result is still 0.007 which produced a large number of trees.
+
+Fit the new parameter model.
+
+```{r}
+final_wf = 
+  Homes_wflow %>% 
+  finalize_workflow(best_tree)
+
+final_fit = fit(final_wf, train)
+
+tree = final_fit %>% 
+  pull_workflow_fit() %>% 
+  pluck("fit")
+
+fancyRpartPlot(tree, tweak = 1.5)
+```
+
+There are no changes from the tuned parameters and the computer selected ones. The predictions for the two models are the same as well.
+
+#Neural Network ----------------------------------------------------------------
+Make a neural network model with the training and test sets.
+
+```{r}
+Homes_recipe = recipe(Above_Median ~., train) %>%
+  step_normalize(all_predictors(), -all_nominal()) %>% #normalize the numeric predictors, not needed for categorical
+  step_dummy(all_nominal(), -all_outcomes())
+
+Homes_model = 
+  mlp(hidden_units = tune(), penalty = tune(), 
+      epochs = tune()) %>%
+  set_mode("classification") %>% 
+  set_engine("nnet", verbose = 0) #verbose = 0 reduces output from the model
+  
+Homes_workflow <- 
+  workflow() %>% 
+  add_recipe(Homes_recipe) %>% 
+  add_model(Homes_model) 
+
+set.seed(1234)
+neural_tune <-
+  tune_grid(Homes_workflow, resamples = folds, grid = 25)
+
+```
+
+Show accuracy for epochs, hidden_units, and penalty
+
+```{r}
+neural_tune %>%
+  collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  select(mean, hidden_units, penalty, epochs) %>%
+  pivot_longer(hidden_units:epochs,
+    values_to = "value",
+    names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "Accuracy")
+```
+
+
+The epoch is used to determine the accuracy of the model by measuring the number of times the data is passed through the model.  The hidden units a the layers in the network in between the input and output using weighted result to pass on to the next layer.  The penalty function is used to reduce unnecessary connections and to keep connections from developing large values.
+
+Select best neural parameter.
+
+```{r}
+best_nn = select_best(neural_tune, "accuracy")
+
+final_nn = finalize_workflow(
+  Homes_workflow,
+  best_nn
+)
+
+final_nn
+```
+
+Fit the model to the training data.
+
+```{r}
+final_nn_fit = fit(final_nn, train)
+```
+
+Make prediction with the model and training set.
+
+```{r}
+trainprednn = predict(final_nn_fit, train)
+head(trainprednn)
+
+confusionMatrix(trainprednn$.pred_class, train$Above_Median, 
+                positive = "Yes")
+```
+
+Predict test set using model.
+
+```{r}
+testprednn = predict(final_nn_fit, test)
+head(testprednn)
+
+confusionMatrix(testprednn$.pred_class, test$Above_Median, 
+                positive = "Yes")
+```
+
+The training and test sets performed better in the neural network than in the random forest and classification tree.
+
+Tuning epoch, hidden_units, and penalty for a refined neural network.
+
+```{r}
+neural_grid = grid_regular(
+  hidden_units(range = c(1,2)),
+  penalty(range = c(-10,-1)), 
+  #penalty is a weird one, you are not setting the actual penalty itself, you are setting the range of x in 10^x
+  epochs(range = c(1,100)),
+  levels = 10
+)
+  
+Homes_recipe = recipe(Above_Median ~., train) %>%
+  step_normalize(all_predictors(), -all_nominal()) #normalize the numeric predictors, not needed for categorical
+
+Homes_model = 
+  mlp(hidden_units = tune(), penalty = tune(), 
+      epochs = tune()) %>%
+  set_mode("classification") %>% 
+  set_engine("nnet", verbose = 0) #verbose = 0 reduces output from the model
+  
+Homes_workflow <- 
+  workflow() %>% 
+  add_recipe(Homes_recipe) %>% 
+  add_model(Homes_model) 
+
+set.seed(1234)
+neural_tune <-
+  tune_grid(Homes_workflow, resamples = folds, grid = neural_grid)
+```
+
+Visualize new epochs, hidden units, and penalty parameters.
+
+```{r}
+neural_tune %>%
+  collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  select(mean, hidden_units, penalty, epochs) %>%
+  pivot_longer(hidden_units:epochs,
+    values_to = "value",
+    names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "Accuracy")
+```
+
+New parameters are at 90% accruacy.
+
+Find the best parameters in the tuned neural network.
+
+```{r}
+best_nn = select_best(neural_tune, "accuracy")
+
+final_nn = finalize_workflow(
+  Homes_workflow,
+  best_nn
+)
+
+final_nn
+```
+
+Fit the model with the training set.
+
+```{r}
+final_nn_fit = fit(final_nn, train)
+```
+
+Make a prediction and confusion matrix with the training set.
+
+```{r}
+trainprednn = predict(final_nn_fit, train)
+head(trainprednn)
+
+confusionMatrix(trainprednn$.pred_class, train$Above_Median, 
+                positive = "Yes")
+```
+
+Make prediction with test set.
+
+```{r}
+testprednn = predict(final_nn_fit, test)
+head(testprednn)
+
+confusionMatrix(testprednn$.pred_class, test$Above_Median, 
+                positive = "Yes")
+```
+
+##Summary
+The tuned parameter model performed slightly less accurately than the computer selected model but the parameters are much lower. smaller epoch will be less computationally intensive.
+
+# Log regression ---------------------------------------------------------------
+Make log regression model with the training set.
+
+```{r}
+Homes_model = 
+  logistic_reg(mode = "classification") %>% #note the use of logistic_reg and mode = "classification"
+  set_engine("glm") #standard logistic regression engine is glm
+
+
+logreg_wf = workflow() %>%
+  add_recipe(Homes_recipe) %>%
+  add_model(Homes_model)
+
+Homes_fit = fit(logreg_wf, train)
+```
+
+```{r}
+options(scipen = 999)
+summary(Homes_fit$fit$fit$fit)
+options(scipen = 0)
+```
+
+A lower AIC value is better.  3555.7
+
+Predict response with training set.
+
+```{r}
+predictions = predict(Homes_fit, train, type="prob")[1]
+#develop predicted probabilities
+head(predictions)
+```
+
+Threshold selection.
+
+```{r}
+#Change this next line to the names of your predictions and the response variable in the training data frame
+ROCRpred = prediction(predictions, train$Above_Median)
+
+###You shouldn't need to ever change the next two lines:
+ROCRperf = performance(ROCRpred, "tpr", "fpr")
+plot(ROCRperf, colorize=TRUE, print.cutoffs.at=seq(0,1,by=0.1), text.adj=c(-0.2,1.7))
+```
+
+The graph indicates that the threshold should be 1 and all houses will sell for above the median.
+
+```{r}
+as.numeric(performance(ROCRpred, "auc")@y.values)
+```
+
+```{r}
+#Determine threshold to balance sensitivity and specificity
+#DO NOT modify this code
+opt.cut = function(perf, pred){
+    cut.ind = mapply(FUN=function(x, y, p){
+        d = (x - 0)^2 + (y-1)^2
+        ind = which(d == min(d))
+        c(sensitivity = y[[ind]], specificity = 1-x[[ind]], 
+            cutoff = p[[ind]])
+    }, perf@x.values, perf@y.values, pred@cutoffs)
+}
+print(opt.cut(ROCRperf, ROCRpred))
+```
+
+```{r}
+#confusion matrix
+#The "No" and "Yes" represent the actual values
+#The "FALSE" and "TRUE" represent our predicted values
+t1 = table(train$Above_Median, predictions > 1)
+t1
+```
+
+With a cut off of 1 there are no correct yes's and 707 correct no's
+
+```{r}
+#confusion matrix
+#The "No" and "Yes" represent the actual values
+#The "FALSE" and "TRUE" represent our predicted values
+t1 = table(train$Above_Median, predictions > .5)
+t1
+```
+
+```{r}
+(t1[1,1]+t1[2,2])/nrow(train)
+```
+
+Less than half accuracy and slightly above a quarter accuracy.  Logistic regression does not make a good fit for the data.
+
